@@ -1,13 +1,28 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine. See: https://circleci.com/docs/2.0/configuration-reference
 version: 2.1
-# Use a package of configuration called an orb.
 orbs:
-  # Declare a dependency on the welcome-orb
-  welcome: circleci/welcome-orb@0.4.1
-# Orchestrate or schedule a set of jobs
+  aws-ecr: circleci/aws-ecr@0.0.2
+  aws-ecs: circleci/aws-ecs@0.0.10
 workflows:
-  # Name the workflow "welcome"
-  welcome:
-    # Run the welcome/run job in its own container
+  build-and-deploy:
     jobs:
-      - welcome/run
+      - aws-ecr/build_and_push_image:
+          account-url: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          repo: "${AWS_RESOURCE_NAME_PREFIX}"
+          region: ${AWS_DEFAULT_REGION}
+          tag: "${CIRCLE_SHA1}"
+      - aws-ecs/deploy-service-update:
+          requires:
+            - aws-ecr/build_and_push_image
+          aws-region: ${AWS_DEFAULT_REGION}
+          family: "${AWS_RESOURCE_NAME_PREFIX}-service"
+          cluster-name: "${AWS_RESOURCE_NAME_PREFIX}-cluster"
+          container-image-name-updates: "container=${AWS_RESOURCE_NAME_PREFIX}-service,image-and-tag=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${AWS_RESOURCE_NAME_PREFIX}:${CIRCLE_SHA1}"
+          verify-revision-is-deployed: true
+          post-steps:
+            - run:
+                name: Test the deployment
+                command: |
+                  TARGET_GROUP_ARN=$(aws ecs describe-services --cluster ${AWS_RESOURCE_NAME_PREFIX}-cluster --services ${AWS_RESOURCE_NAME_PREFIX}-service | jq -r '.services[0].loadBalancers[0].targetGroupArn')
+                  ELB_ARN=$(aws elbv2 describe-target-groups --target-group-arns $TARGET_GROUP_ARN | jq -r '.TargetGroups[0].LoadBalancerArns[0]')
+                  ELB_DNS_NAME=$(aws elbv2 describe-load-balancers --load-balancer-arns $ELB_ARN | jq -r '.LoadBalancers[0].DNSName')
+                  curl -s --retry 10 http://$ELB_DNS_NAME | grep "Welcome to nginx!"
